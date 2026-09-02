@@ -1,13 +1,17 @@
 pipeline {
     agent any
 
+    environment {
+        DOCKERHUB_USERNAME = 'satvikhgupta'   
+        BACKEND_IMAGE      = "${DOCKERHUB_USERNAME}/travelmemory-backend" // satvikhgupta/travel-backend
+        FRONTEND_IMAGE     = "${DOCKERHUB_USERNAME}/travelmemory-frontend" // satvikhgupta/travel-frontend
+        TAG                = "${BUILD_NUMBER}" 
+    }
+
     stages {
 
         stage('Checkout') {
-            steps {
-                echo 'Code SCM se checkout ho gaya'
-                sh 'ls -la'
-            }
+            steps { echo 'Code checkout done'; sh 'ls -la' }
         }
 
         stage('OWASP Dependency Check') {
@@ -15,29 +19,17 @@ pipeline {
                 withCredentials([string(credentialsId: 'nvd-api-key',
                                         variable: 'NVD_API_KEY')]) {
                     dependencyCheck(
-                        additionalArguments: '''
-                            --scan ./
-                            --format XML
-                            --format HTML
-                            --nvdApiKey $NVD_API_KEY
-                        ''',
+                        additionalArguments: '--scan ./ --format XML --format HTML --nvdApiKey $NVD_API_KEY',
                         odcInstallation: 'DP-Check'
                     )
                 }
-                // Report Jenkins UI par dikhane ke liye
                 dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
         }
 
         stage('Trivy Filesystem Scan') {
             steps {
-                // Report mode: HIGH,CRITICAL findings ek file mein
-                sh '''
-                    trivy fs . \
-                      --severity HIGH,CRITICAL \
-                      --format table \
-                      -o trivy-fs-report.txt
-                '''
+                sh 'trivy fs . --severity HIGH,CRITICAL --format table -o trivy-fs-report.txt'
             }
         }
 
@@ -59,15 +51,53 @@ pipeline {
                 }
             }
         }
+
+        stage('Build Backend Image') {
+            steps {
+                // context ./backend - Dockerfile wahin hai
+                sh "docker build -t ${BACKEND_IMAGE}:${TAG} -t ${BACKEND_IMAGE}:latest ./backend"
+            } 
+        }
+
+        stage('Build Frontend Image') {
+            steps {
+                sh "docker build -t ${FRONTEND_IMAGE}:${TAG} -t ${FRONTEND_IMAGE}:latest ./frontend"
+            }
+        }
+
+        stage('Trivy Image Scan') {
+            steps {
+                // Push se PEHLE image scan
+                sh "trivy image --severity HIGH,CRITICAL --format table -o trivy-backend-image.txt ${BACKEND_IMAGE}:${TAG}"
+                sh "trivy image --severity HIGH,CRITICAL --format table -o trivy-frontend-image.txt ${FRONTEND_IMAGE}:${TAG}"
+            }
+        }
+
+        stage('Push to DockerHub') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'docker-hub-creds',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS')]) {
+                    sh '''
+                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                    '''
+                    sh "docker push ${BACKEND_IMAGE}:${TAG}"
+                    sh "docker push ${BACKEND_IMAGE}:latest"
+                    sh "docker push ${FRONTEND_IMAGE}:${TAG}"
+                    sh "docker push ${FRONTEND_IMAGE}:latest"
+                }
+            }
+        }
     }
 
     post {
         always {
-            // Saari reports download ke liye archive
             archiveArtifacts artifacts: 'trivy-*.txt,**/dependency-check-report.*',
                              allowEmptyArchive: true
+            sh 'docker logout || true'
         }
-        success { echo 'Security + Quality checks passed' }
-        failure { echo 'Kuch fail hua - reports check karein' }
+        success { echo 'Images built, scanned, pushed!' }
+        failure { echo 'Fail hua - logs/reports dekhein' }
     }
 }

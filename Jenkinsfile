@@ -10,14 +10,42 @@ pipeline {
             }
         }
 
+        stage('OWASP Dependency Check') {
+            steps {
+                withCredentials([string(credentialsId: 'nvd-api-key',
+                                        variable: 'NVD_API_KEY')]) {
+                    dependencyCheck(
+                        additionalArguments: '''
+                            --scan ./
+                            --format XML
+                            --format HTML
+                            --nvdApiKey $NVD_API_KEY
+                        ''',
+                        odcInstallation: 'DP-Check'
+                    )
+                }
+                // Report Jenkins UI par dikhane ke liye
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+
+        stage('Trivy Filesystem Scan') {
+            steps {
+                // Report mode: HIGH,CRITICAL findings ek file mein
+                sh '''
+                    trivy fs . \
+                      --severity HIGH,CRITICAL \
+                      --format table \
+                      -o trivy-fs-report.txt
+                '''
+            }
+        }
+
         stage('SonarQube Analysis') {
             steps {
-                // 'sonar-server' = System config waala naam
                 withSonarQubeEnv('sonar-server') {
                     script {
-                        // 'sonar-scanner' = Tools waala naam
                         def scannerHome = tool 'sonar-scanner'
-                        // properties file root mein hai, isliye sirf command chalegi
                         sh "${scannerHome}/bin/sonar-scanner"
                     }
                 }
@@ -26,7 +54,6 @@ pipeline {
 
         stage('Quality Gate') {
             steps {
-                // 2 min tak wait; agar gate FAIL to pipeline abort
                 timeout(time: 2, unit: 'MINUTES') {
                     waitForQualityGate abortPipeline: true
                 }
@@ -35,7 +62,12 @@ pipeline {
     }
 
     post {
-        success { echo 'Pipeline passed - code quality OK' }
-        failure { echo 'Pipeline failed - Sonar ya Quality Gate check karein' }
+        always {
+            // Saari reports download ke liye archive
+            archiveArtifacts artifacts: 'trivy-*.txt,**/dependency-check-report.*',
+                             allowEmptyArchive: true
+        }
+        success { echo 'Security + Quality checks passed' }
+        failure { echo 'Kuch fail hua - reports check karein' }
     }
 }
